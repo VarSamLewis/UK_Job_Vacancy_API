@@ -3,7 +3,7 @@ from time import time
 import threading
 
 
-if __name__ == "__main__":
+def main():
     from src.ingestion.df_parsing.vacs01 import main as vacs01_main
     from src.ingestion.df_parsing.vacs02 import main as vacs02_main
     from src.ingestion.df_parsing.vacs03 import main as vacs03_main
@@ -29,3 +29,6 @@ if __name__ == "__main__":
     #x06_main()
     end_time = time()
     logger.info(f"All scripts completed in {end_time - start_time:.2f} seconds.")
+
+    if __name__ == "__main__":
+        main()
