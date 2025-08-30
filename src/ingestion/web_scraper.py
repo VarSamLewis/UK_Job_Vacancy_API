@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 from typing import List, Set, Dict, Optional, Tuple
 from dataclasses import dataclass
+import random
 
 @dataclass
 class DownloadResult:
@@ -31,15 +32,17 @@ class ONSExcelDownloader:
     """
     A class to download Excel files from ONS (Office for National Statistics) websites
     using Beautiful Soup for HTML parsing and requests for downloading.
+    Enhanced with better rate limiting and retry mechanisms.
     """
     
     def __init__(self, 
                  download_path: str,
                  user_agent: str = None,
                  timeout: int = 30,
-                 delay_between_files: int = 2,
-                 delay_between_urls: int = 3,
-                 min_request_interval: int = 10):
+                 delay_between_files: int = 5,
+                 delay_between_urls: int = 10,
+                 max_retries: int = 3,
+                 retry_delay: int = 30):
         """
         Initialize the ONS Excel Downloader
         
@@ -49,21 +52,30 @@ class ONSExcelDownloader:
             timeout: Request timeout in seconds
             delay_between_files: Delay between file downloads in seconds
             delay_between_urls: Delay between processing URLs in seconds
+            max_retries: Maximum number of retry attempts for failed requests
+            retry_delay: Base delay for retries in seconds
         """
         self.download_path = Path(download_path)
         self.timeout = timeout
         self.delay_between_files = delay_between_files
         self.delay_between_urls = delay_between_urls
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
         self.base_url = "https://www.ons.gov.uk"
-        self.last_request_time = 0
-        self.min_request_interval = min_request_interval  # seconds
         
-        # Setup headers
+        # Setup headers with more realistic browser simulation
         self.headers = {
-            'User-Agent': user_agent or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate',
+            'User-Agent': user_agent or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
             'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
         }
         
         # Create download directory
@@ -77,6 +89,63 @@ class ONSExcelDownloader:
             'total_size': 0,
             'errors': []
         }
+        
+        # Session for connection reuse
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+    
+    def wait_with_jitter(self, base_delay: int, multiplier: float = 1.0):
+        """Add random jitter to delays to avoid synchronized requests"""
+        jitter = random.uniform(0.5, 1.5)
+        actual_delay = base_delay * multiplier * jitter
+        time.sleep(actual_delay)
+    
+    def make_request_with_retry(self, url: str, method: str = 'GET', **kwargs) -> Optional[requests.Response]:
+        """
+        Make HTTP request with exponential backoff retry for rate limiting
+        
+        Args:
+            url: URL to request
+            method: HTTP method
+            **kwargs: Additional arguments for requests
+            
+        Returns:
+            Response object or None if all retries failed
+        """
+        for attempt in range(self.max_retries + 1):
+            try:
+                if method.upper() == 'HEAD':
+                    response = self.session.head(url, timeout=self.timeout, **kwargs)
+                else:
+                    response = self.session.get(url, timeout=self.timeout, **kwargs)
+                
+                if response.status_code == 429:
+                    if attempt < self.max_retries:
+                        # Exponential backoff with jitter
+                        retry_wait = self.retry_delay * (2 ** attempt)
+                        jitter = random.uniform(0.8, 1.2)
+                        actual_wait = retry_wait * jitter
+                        
+                        print(f"   Rate limited (429). Waiting {actual_wait:.1f}s before retry {attempt + 1}/{self.max_retries}...")
+                        time.sleep(actual_wait)
+                        continue
+                    else:
+                        print(f"   Rate limited after {self.max_retries} retries. Skipping.")
+                        return None
+                
+                response.raise_for_status()
+                return response
+                
+            except requests.exceptions.RequestException as e:
+                if attempt < self.max_retries:
+                    wait_time = self.retry_delay * (2 ** attempt) * random.uniform(0.8, 1.2)
+                    print(f"   Request failed: {str(e)}. Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"   Request failed after {self.max_retries} retries: {str(e)}")
+                    return None
+        
+        return None
     
     def extract_dataset_name(self, url: str) -> str:
         """Extract dataset name from URL for file naming"""
@@ -89,7 +158,7 @@ class ONSExcelDownloader:
                 if identifier_match:
                     return identifier_match.group(1).upper()
                 # Fallback to first part before special chars
-                return dataset_part.split('_')[0].split('-')[0].upper()[:10]
+                return dataset_part.split('_')[0].split('-')[0].upper()[:20]
             return "ons_dataset"
         except Exception:
             return "ons_dataset"
@@ -116,74 +185,61 @@ class ONSExcelDownloader:
     
     def download_file(self, url: str, filename: str, verbose: bool = True) -> DownloadResult:
         """
-        Download a single Excel file with validation, enforcing a minimum delay between requests.
+        Download a single Excel file with validation and retry logic
+        
+        Args:
+            url: URL of the file to download
+            filename: Name to save the file as
+            verbose: Whether to print progress information
+            
+        Returns:
+            DownloadResult object with success status and details
         """
         file_path = self.download_path / filename
-
+        
         try:
-            # Enforce minimum delay between requests
-            now = time.time()
-            elapsed = now - self.last_request_time
-            if elapsed < self.min_request_interval:
-                sleep_time = self.min_request_interval - elapsed
-                if verbose:
-                    print(f"Waiting {sleep_time:.1f}s before next request to respect rate limits...")
-                time.sleep(sleep_time)
-            self.last_request_time = time.time()
-
             if verbose:
                 print(f"   Requesting: {url}")
-
+            
             # Setup headers for Excel files
             download_headers = {
-                **self.headers,
                 'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,*/*',
                 'Referer': 'https://www.ons.gov.uk/',
-                'Accept-Encoding': 'identity'
+                'Accept-Encoding': 'gzip, deflate, br'
             }
-
-            # HEAD request to validate
-            head_response = requests.head(url, headers=download_headers, allow_redirects=True, timeout=self.timeout)
-
+            
+            # HEAD request to validate with retry
+            head_response = self.make_request_with_retry(url, 'HEAD', headers=download_headers, allow_redirects=True)
+            if not head_response:
+                return DownloadResult(False, filename, 0, "Failed to get file headers after retries", url)
+            
             if verbose:
                 print(f"   Status: {head_response.status_code}")
                 print(f"   Content-Type: {head_response.headers.get('Content-Type', 'Unknown')}")
                 print(f"   Content-Length: {head_response.headers.get('Content-Length', 'Unknown')}")
-
+            
             # Validate response
             is_valid, error_msg = self.validate_excel_file(head_response)
             if not is_valid:
                 return DownloadResult(False, filename, 0, error_msg, url)
-
-            # Enforce minimum delay before GET request
-            now = time.time()
-            elapsed = now - self.last_request_time
-            if elapsed < self.min_request_interval:
-                sleep_time = self.min_request_interval - elapsed
-                if verbose:
-                    print(f"Waiting {sleep_time:.1f}s before next request to respect rate limits...")
-                time.sleep(sleep_time)
-            self.last_request_time = time.time()
-
-            # Download the file
-            response = requests.get(url, stream=True, headers=download_headers, allow_redirects=True, timeout=120)
-            if response.status_code == 429:
-                retry_after = int(response.headers.get('Retry-After', '60'))
-                print(f"Rate limited. Waiting {retry_after} seconds before retrying...")
-                time.sleep(retry_after)
-                self.last_request_time = time.time()
-                response = requests.get(url, stream=True, headers=download_headers, allow_redirects=True, timeout=120)
-            response.raise_for_status()
-
+            
+            # Small delay before actual download
+            self.wait_with_jitter(2)
+            
+            # Download the file with retry
+            response = self.make_request_with_retry(url, 'GET', stream=True, headers=download_headers, allow_redirects=True)
+            if not response:
+                return DownloadResult(False, filename, 0, "Failed to download file after retries", url)
+            
             # Final validation
             is_valid, error_msg = self.validate_excel_file(response)
             if not is_valid:
                 return DownloadResult(False, filename, 0, error_msg, url)
-
+            
             # Save file with progress
             total_size = int(response.headers.get('content-length', 0))
             downloaded_size = 0
-
+            
             with open(file_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
@@ -192,28 +248,30 @@ class ONSExcelDownloader:
                         if verbose and total_size > 0:
                             progress = (downloaded_size / total_size) * 100
                             print(f"   Progress: {progress:.1f}%", end='\r')
-
+            
             if verbose:
                 print()  # New line after progress
-
+            
             # Verify downloaded file
             if file_path.exists():
                 file_size = file_path.stat().st_size
                 if file_size < 1000:
+                    # Read first few bytes for debugging
                     with open(file_path, 'rb') as f:
                         first_bytes = f.read(200)
-                    file_path.unlink()
-                    return DownloadResult(False, filename, 0,
-                                         f"Downloaded file too small ({file_size} bytes). First bytes: {first_bytes[:50]}...", url)
-
+                    
+                    file_path.unlink()  # Remove corrupted file
+                    return DownloadResult(False, filename, 0, 
+                                        f"Downloaded file too small ({file_size} bytes). First bytes: {first_bytes[:50]}...", url)
+                
                 if verbose:
                     print(f"   Downloaded: {filename} ({file_size / 1024:.1f} KB)")
-
+                
                 self.stats['total_size'] += file_size
                 return DownloadResult(True, filename, file_size, "", url)
-
+            
             return DownloadResult(False, filename, 0, "File not created after download", url)
-
+            
         except Exception as e:
             return DownloadResult(False, filename, 0, f"Download failed: {str(e)}", url)
     
@@ -278,7 +336,7 @@ class ONSExcelDownloader:
                 if any(ext.lower() in href.lower() for ext in excel_extensions):
                     if href.startswith('/'):
                         full_url = base_url + href
-                    elif not href.startswith('http'):
+                    elif not href.startswith("http"):
                         full_url = f"{base_url}/{href.lstrip('/')}"
                     else:
                         full_url = href
@@ -308,12 +366,13 @@ class ONSExcelDownloader:
         
         # Try to get filename from Content-Disposition header
         try:
-            head_response = requests.head(url, headers=self.headers, allow_redirects=True, timeout=15)
-            content_disposition = head_response.headers.get('Content-Disposition', '')
-            if 'filename=' in content_disposition:
-                filename = content_disposition.split('filename=')[1].strip('"\'')
-                if filename and filename.lower().endswith(('.xlsx', '.xls')):
-                    return filename
+            head_response = self.make_request_with_retry(url, 'HEAD', allow_redirects=True)
+            if head_response:
+                content_disposition = head_response.headers.get('Content-Disposition', '')
+                if 'filename=' in content_disposition:
+                    filename = content_disposition.split('filename=')[1].strip('"\'')
+                    if filename and filename.lower().endswith(('.xlsx', '.xls')):
+                        return filename
         except Exception:
             pass
         
@@ -346,12 +405,13 @@ class ONSExcelDownloader:
     
     def process_url(self, url: str, verbose: bool = True) -> DatasetResult:
         """
-        Process a single URL to find and download all Excel files
-        
+        Process a single URL to find and download all Excel file links on the page.
+        Enhanced with better error handling and rate limiting.
+            
         Args:
             url: URL to process
             verbose: Whether to print detailed progress
-            
+
         Returns:
             DatasetResult with processing details
         """
@@ -364,148 +424,175 @@ class ONSExcelDownloader:
             downloaded_files=[],
             errors=[]
         )
-        
+
         try:
             if verbose:
                 print(f"Fetching webpage: {url}")
-            
-            # Fetch the webpage
+
+            # Fetch the webpage with retry mechanism
             page_headers = {
-                **self.headers,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
             }
-            
-            response = requests.get(url, headers=page_headers, timeout=self.timeout)
-            response.raise_for_status()
-            
+
+            response = self.make_request_with_retry(url, headers=page_headers)
+            if not response:
+                error_msg = "Failed to fetch webpage after retries"
+                result.errors.append(error_msg)
+                return result
+
             if verbose:
                 print(f"Status: {response.status_code}")
                 print(f"Page size: {len(response.content)} bytes")
-            
-            # Extract Excel links
-            excel_links = self.extract_excel_links(response.text)
+
+            # Find all Excel links on the page
+            soup = BeautifulSoup(response.text, 'html.parser')
+            excel_extensions = ('.xlsx', '.xls')
+            excel_links = []
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if any(href.lower().endswith(ext) for ext in excel_extensions):
+                    # Convert relative URLs to absolute
+                    if href.startswith('/'):
+                        full_url = self.base_url + href
+                    elif not href.startswith('http'):
+                        full_url = f"{self.base_url}/{href.lstrip('/')}"
+                    else:
+                        full_url = href
+                    excel_links.append(full_url)
+
             result.files_found = len(excel_links)
-            
             if not excel_links:
                 error_msg = "No Excel files found on this page"
                 result.errors.append(error_msg)
                 if verbose:
-                    print(f"Error: {error_msg}")
+                    print(f"Found 0 Excel file(s) on the page")
+                    print(f"Dataset: {dataset_name}")
                 return result
-            
+
             if verbose:
-                print(f"Found {len(excel_links)} Excel file(s)")
+                print(f"Found {len(excel_links)} Excel file(s) on the page")
                 print(f"Dataset: {dataset_name}")
-            
-            # Download each file
+
+            # Download all Excel files found
+            if verbose:
+                print("Files to download (all Excel links):")
             for i, link in enumerate(excel_links, 1):
-                try:
-                    # Generate filename
-                    filename = self.get_filename_from_url(link, dataset_name, i)
-                    filename = self.ensure_unique_filename(filename)
-                    
+                filename = self.get_filename_from_url(link, dataset_name, i)
+                filename = self.ensure_unique_filename(filename)
+                if verbose:
+                    print(f"  {i}. {filename} -> {link}")
+
+            # Actually download the files
+            for i, link in enumerate(excel_links, 1):
+                filename = self.get_filename_from_url(link, dataset_name, i)
+                filename = self.ensure_unique_filename(filename)
+                
+                if verbose:
+                    print(f"\nDownloading file {i}/{len(excel_links)}: {filename}")
+                
+                download_result = self.download_file(link, filename, verbose)
+                result.downloaded_files.append(download_result)
+                
+                if download_result.success:
+                    result.files_downloaded += 1
+                    self.stats['files_downloaded'] += 1
+                else:
+                    result.errors.append(f"Failed to download {filename}: {download_result.error_message}")
                     if verbose:
-                        print(f"\nDownloading file {i}/{len(excel_links)}: {filename}")
-                    
-                    # Download the file
-                    download_result = self.download_file(link, filename, verbose)
-                    result.downloaded_files.append(download_result)
-                    
-                    if download_result.success:
-                        result.files_downloaded += 1
-                        self.stats['files_downloaded'] += 1
-                    else:
-                        result.errors.append(f"Failed to download {filename}: {download_result.error_message}")
-                        if verbose:
-                            print(f"Error: {download_result.error_message}")
-                    
-                    # Delay between files
-                    if i < len(excel_links) and self.delay_between_files > 0:
-                        time.sleep(self.delay_between_files)
-                        
-                except Exception as e:
-                    error_msg = f"Error processing file {i}: {str(e)}"
-                    result.errors.append(error_msg)
+                        print(f"Error: {download_result.error_message}")
+                
+                # Wait between files with jitter
+                if i < len(excel_links) and self.delay_between_files > 0:
                     if verbose:
-                        print(f"Error: {error_msg}")
-            
+                        print(f"   Waiting {self.delay_between_files}s before next file...")
+                    self.wait_with_jitter(self.delay_between_files)
+
             self.stats['files_found'] += result.files_found
-            
+
         except Exception as e:
             error_msg = f"Error processing URL {url}: {str(e)}"
             result.errors.append(error_msg)
             self.stats['errors'].append(error_msg)
             if verbose:
                 print(f"Error: {error_msg}")
-        
+
         return result
-    
+
     def download_from_urls(self, urls: List[str], verbose: bool = True) -> List[DatasetResult]:
         """
-        Download Excel files from multiple URLs
+        Download Excel files from multiple URLs with improved rate limiting
         
         Args:
             urls: List of URLs to process
             verbose: Whether to print detailed progress
-            
+
         Returns:
             List of DatasetResult objects
         """
         results = []
-        
+
         if verbose:
             print(f"Processing {len(urls)} URL(s)...")
             print(f"Download directory: {self.download_path}")
-        
+            print(f"Rate limiting: {self.delay_between_urls}s between URLs, {self.delay_between_files}s between files")
+
         for i, url in enumerate(urls, 1):
             if verbose:
                 print(f"\n{'='*60}")
                 print(f"Processing URL {i}/{len(urls)}: {self.extract_dataset_name(url)}")
                 print(f"   {url}")
-            
+
             result = self.process_url(url, verbose)
             results.append(result)
             self.stats['urls_processed'] += 1
-            
-            # Delay between URLs
+
+            # Delay between URLs with jitter
             if i < len(urls) and self.delay_between_urls > 0:
                 if verbose:
                     print(f"Waiting {self.delay_between_urls}s before next URL...")
-                time.sleep(self.delay_between_urls)
-        
+                self.wait_with_jitter(self.delay_between_urls)
+
         return results
-    
+
     def print_summary(self, results: List[DatasetResult]):
         """Print a summary of the download session"""
         print(f"\n{'='*60}")
         print(f"Download Session Complete!")
         print(f"{'='*60}")
-        
+
         print(f"Summary:")
         print(f"   URLs processed: {self.stats['urls_processed']}")
         print(f"   Files found: {self.stats['files_found']}")
         print(f"   Files downloaded: {self.stats['files_downloaded']}")
         print(f"   Total size: {self.stats['total_size'] / 1024 / 1024:.1f} MB")
         print(f"   Errors: {len(self.stats['errors'])}")
-        
+
         if results:
             print(f"\nPer Dataset Results:")
             for result in results:
                 success_rate = (result.files_downloaded / result.files_found * 100) if result.files_found > 0 else 0
                 print(f"   [{result.dataset_name}] {result.files_downloaded}/{result.files_found} files ({success_rate:.1f}%)")
-                
+
                 # Show successful downloads
                 successful_files = [dr for dr in result.downloaded_files if dr.success]
                 if successful_files:
                     for file_result in successful_files:
                         print(f"      {file_result.filename} ({file_result.file_size / 1024:.1f} KB)")
-                
+
                 # Show errors
                 if result.errors:
                     for error in result.errors[:3]:  # Show first 3 errors
                         print(f"      Error: {error}")
                     if len(result.errors) > 3:
                         print(f"      ... and {len(result.errors) - 3} more errors")
+        
+        # Suggestions for failed downloads
+        failed_results = [r for r in results if r.files_downloaded < r.files_found or r.errors]
+        if failed_results:
+            print(f"\nTroubleshooting suggestions:")
+            print(f"   - Try increasing delays (currently {self.delay_between_urls}s between URLs)")
+            print(f"   - Run script during off-peak hours")
+            print(f"   - Process failed URLs individually with longer delays")
     
     def get_existing_files(self) -> List[Dict]:
         """Get list of existing Excel files in download directory"""
@@ -522,41 +609,46 @@ class ONSExcelDownloader:
                     })
         
         return existing_files
-
-# Example usage and convenience functions
-def create_downloader(download_path: str, **kwargs) -> ONSExcelDownloader:
-    """Convenience function to create a downloader instance"""
-    return ONSExcelDownloader(download_path, **kwargs)
-
-def quick_download(urls: List[str], download_path: str, verbose: bool = True) -> List[DatasetResult]:
-    """Quick download function for simple use cases"""
-    downloader = ONSExcelDownloader(download_path)
-    results = downloader.download_from_urls(urls, verbose)
-    if verbose:
-        downloader.print_summary(results)
-    return results
-
-# Example usage
+    
+    def download_single_url(self, url: str, verbose: bool = True) -> DatasetResult:
+        """
+        Download from a single URL - useful for retry attempts
+        
+        Args:
+            url: URL to process
+            verbose: Whether to print detailed progress
+            
+        Returns:
+            DatasetResult object
+        """
+        if verbose:
+            print(f"Processing single URL: {self.extract_dataset_name(url)}")
+            print(f"URL: {url}")
+        
+        return self.process_url(url, verbose)
+        
 if __name__ == "__main__":
-    print("ONS Excel Downloader Class")
+    print("ONS Excel Downloader Class - Enhanced Version")
     print("=" * 60)
     
-    # Configuration
+    # Configuration - increased delays for better rate limiting
     urls_to_process = [
-        "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/vacanciesandunemploymentvacs01/current"
-        #,"https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/vacanciesbyindustryvacs02/current"
-        #,"https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/vacanciesbysizeofbusinessvacs03/current"
-        #,"https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/x06singlemonthvacanciesestimatesnotdesignatedasnationalstatistics/current"
+        "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/vacanciesandunemploymentvacs01",
+        "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/vacanciesbyindustryvacs02",
+        "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/vacanciesbysizeofbusinessvacs03",
+        "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/x06singlemonthvacanciesestimatesnotdesignatedasnationalstatistics"
     ]
     
     download_path = r"C:\Users\samle\Source\Repos\UK_Job_Vacancy_API\Data"
     
-    # Method 1: Using the class directly
+    # Enhanced configuration for better rate limiting
     downloader = ONSExcelDownloader(
         download_path=download_path,
-        timeout=30,
-        delay_between_files=2,
-        delay_between_urls=3
+        timeout=60,
+        delay_between_files=8,  # Increased from 2 to 8 seconds
+        delay_between_urls=15,  # Increased from 3 to 15 seconds
+        max_retries=3,
+        retry_delay=45  # 45 seconds base retry delay
     )
     
     # Check existing files
@@ -570,29 +662,42 @@ if __name__ == "__main__":
             print(f"   ... and {len(existing_files) - 5} more files")
         print(f"Total existing size: {total_size / 1024 / 1024:.1f} MB")
         
-        response = input("\nContinue with download? (y/n): ")
-        if response.lower() != 'y':
+        print("\nOptions:")
+        print("1. Continue with all URLs (recommended with longer delays)")
+        print("2. Process failed URLs only")
+        print("3. Cancel")
+        
+        choice = input("Enter choice (1-3): ").strip()
+        
+        if choice == "2":
+            # Only process URLs that failed last time
+            failed_urls = [
+                "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/vacanciesbyindustryvacs02",
+                "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/vacanciesbysizeofbusinessvacs03",
+                "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/x06singlemonthvacanciesestimatesnotdesignatedasnationalstatistics"
+            ]
+            urls_to_process = failed_urls
+            print(f"Processing {len(failed_urls)} failed URLs with enhanced rate limiting...")
+        elif choice == "3":
             print("Download cancelled.")
             exit()
+        # Choice 1 continues with all URLs
     
     # Download files
+    print(f"\nStarting download with enhanced rate limiting...")
+    print(f"Delays: {downloader.delay_between_urls}s between URLs, {downloader.delay_between_files}s between files")
+    print(f"Retries: Up to {downloader.max_retries} attempts with exponential backoff")
+    
     results = downloader.download_from_urls(urls_to_process)
     
     # Print summary
     downloader.print_summary(results)
     
-    print("\nClass-based downloader finished!")
-
-# Alternative quick usage:
-"""
-# Method 2: Quick download function
-results = quick_download(urls_to_process, download_path)
-
-# Method 3: Custom configuration
-downloader = create_downloader(
-    download_path, 
-    timeout=60, 
-    delay_between_files=1
-)
-results = downloader.download_from_urls(urls_to_process)
-"""
+    print("\nEnhanced downloader finished!")
+    
+    # Suggest individual retry for any remaining failures
+    failed_results = [r for r in results if r.files_downloaded < r.files_found or r.errors]
+    if failed_results:
+        print(f"\nFor remaining failures, try processing URLs individually:")
+        for failed_result in failed_results:
+            print(f"   python -c \"from src.ingestion.web_scraper import ONSExcelDownloader; d = ONSExcelDownloader('{download_path}', delay_between_urls=30, retry_delay=60); d.download_single_url('{failed_result.url}')\"")
