@@ -87,9 +87,7 @@ def main():
              ]
 
     convert_xls_to_xlsx(folder)
-    delete_xls_files(folder)
     
-
     for file in files:
         file_path = os.path.join(folder, file)
         if not os.path.exists(file_path):
