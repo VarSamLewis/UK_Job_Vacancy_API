@@ -1,5 +1,5 @@
 from pathlib import Path
-#from src.utils.df_parsing_utils  import _xlsx_sheets_to_csvs
+from src.utils.df_parsing_utils  import convert_xls_to_xlsx, delete_xls_files
 import pandas as pd
 import os
 from typing import List
@@ -7,6 +7,7 @@ from openpyxl import load_workbook
 import re
 
 from src.utils.logger import logger
+
 
 def _xlsx_sheets_to_csvs_vacs01(file_path: str, output_folder: str , header_row: int = None) -> None:
     """
@@ -80,10 +81,18 @@ def main():
     outpath_folder = Path(r"C:\Users\samle\Source\Repos\UK_Job_Vacancy_API\Data\vacs01")
     files = [f for f in os.listdir(folder) 
              if os.path.isfile(os.path.join(folder, f)) 
-             and f.lower().endswith('.xlsx')
+             and f.lower().endswith('.xlsx') 
              and 'vacs01' in f.lower()
+             and '2017' not in f.lower()
              ]
+
+    convert_xls_to_xlsx(folder)
+    delete_xls_files(folder)
+    
 
     for file in files:
         file_path = os.path.join(folder, file)
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            continue
         _xlsx_sheets_to_csvs_vacs01(file_path, outpath_folder, 3)

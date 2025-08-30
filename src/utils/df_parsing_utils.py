@@ -49,6 +49,52 @@ def _construct_file_paths(folder: str) -> List[str]:
         file_paths.append(file_path)
     return file_paths
 
+
+
+
+
+def convert_xls_to_xlsx(folder: str, output_folder: str = None):
+    """
+    Convert all .xls files in a folder to .xlsx format.
+    Args:
+        folder: Source folder containing .xls files.
+        output_folder: Destination folder for .xlsx files (defaults to source folder).
+    """
+    if output_folder is None:
+        output_folder = folder
+
+    for filename in os.listdir(folder):
+        if filename.lower().endswith('.xls') and not filename.lower().endswith('.xlsx'):
+            xls_path = os.path.join(folder, filename)
+            xlsx_filename = os.path.splitext(filename)[0] + '.xlsx'
+            xlsx_path = os.path.join(output_folder, xlsx_filename)
+            try:
+                # Read all sheets using xlrd
+                xls = pd.ExcelFile(xls_path, engine='xlrd')
+                with pd.ExcelWriter(xlsx_path, engine='openpyxl') as writer:
+                    for sheet_name in xls.sheet_names:
+                        df = xls.parse(sheet_name)
+                        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                print(f"Converted {xls_path} -> {xlsx_path}")
+            except Exception as e:
+                print(f"Failed to convert {xls_path}: {e}")
+
+
+def delete_xls_files(folder: str):
+    files = [f for f in os.listdir(folder) 
+             if os.path.isfile(os.path.join(folder, f)) 
+             and f.lower().endswith('.xlsx') 
+             and 'vacs01' in f.lower()
+             and '2017' not in f.lower()
+             ]
+    for f in files:
+        file_path = os.path.join(folder, f)
+        try:
+            os.remove(file_path)
+            logger.info(f"Deleted file: {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to delete {file_path}: {e}")
+
 ################################################# Common rules for formatting dataframes #################################################
 
 def _clean_column_names(cols: list[str]) -> list[str]:
