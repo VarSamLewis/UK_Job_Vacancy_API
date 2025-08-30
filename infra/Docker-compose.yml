@@ -1,0 +1,58 @@
+version: "3.9"
+
+services:
+  api:
+    build: ./api
+    container_name: uk_jobs_api
+    ports:
+      - "8000:8000" # Maps FastAPI to localhost:8000
+    depends_on:
+      - postgres
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DB: backenddb
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./api:/app # Mount local API code for hot reload
+
+  postgres:
+    image: postgres:15
+    container_name: uk_jobs_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: backenddb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  grafana:
+    image: grafana/grafana:10.1.2
+    container_name: uk_jobs_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: uk_jobs_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus:/etc/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+
+volumes:
+  pgdata:
+  grafana_data:
