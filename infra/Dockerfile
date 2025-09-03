@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+WORKDIR /src/app
 
 # Install dependencies
 COPY requirements.txt .
@@ -13,4 +13,4 @@ COPY . .
 EXPOSE 8000
 
 # Run FastAPI via uvicorn
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
