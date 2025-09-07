@@ -69,18 +69,10 @@ def main_ingestion(folder_path):
             print(df.head())
     logger.info("Main ingestion process complete.")
 
-def create_schema(dfs) -> dict[str, list[pd.DataFrame]]:
-    
-    return result
-    
-
-
 
 
 
 if __name__ == "__main__":
     folder = Path(r"C:\Users\samle\Source\Repos\UK_Job_Vacancy_API\Data")
     dfs = main_ingestion(folder)
-    create_schema(dfs)
-
 
