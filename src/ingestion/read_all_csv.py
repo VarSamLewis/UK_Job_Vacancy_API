@@ -23,10 +23,6 @@ def main():
     for t in threads:
         t.join()
 
-    #vacs01_main()
-    #vacs02_main()
-    #vacs03_main()
-    #x06_main()
     end_time = time()
     logger.info(f"All scripts completed in {end_time - start_time:.2f} seconds.")
 

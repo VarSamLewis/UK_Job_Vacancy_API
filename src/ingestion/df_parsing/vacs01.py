@@ -1,10 +1,8 @@
 from pathlib import Path
-from src.utils.df_parsing_utils  import convert_xls_to_xlsx, delete_xls_files
+from src.utils.df_parsing_utils import convert_xls_to_xlsx
 import pandas as pd
 import os
-from typing import List
 from openpyxl import load_workbook
-import re
 
 from src.utils.logger import logger
 
@@ -77,8 +75,9 @@ def _xlsx_sheets_to_csvs_vacs01(file_path: str, output_folder: str , header_row:
         raise
 
 def main():
-    folder = Path(r"C:\Users\samle\Source\Repos\UK_Job_Vacancy_API\Data")
-    outpath_folder = Path(r"C:\Users\samle\Source\Repos\UK_Job_Vacancy_API\Data\vacs01")
+    BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+    folder = BASE_DIR / "Data"
+    outpath_folder = BASE_DIR / "Data" / "vacs01"
     files = [f for f in os.listdir(folder) 
              if os.path.isfile(os.path.join(folder, f)) 
              and f.lower().endswith('.xlsx') 

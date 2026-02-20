@@ -1,18 +1,20 @@
-﻿import psycopg2
+﻿import os
+import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
-from src.ingestion.create_schema import create_schema
-
+from dotenv import load_dotenv
 from src.utils.logger import logger
+
+load_dotenv()
 
 db_pool = ThreadedConnectionPool(
     minconn=1,
     maxconn=10,
-    dbname="cerbyd_triplogger",
-    user="postgres",
-    password="x836vzm7dI",
-    host="localhost",
-    port=5432
-)  # TODO: Adjust parameters to env vars
+    dbname=os.environ["DB_NAME"],
+    user=os.environ["DB_USER"],
+    password=os.environ["DB_PASSWORD"],
+    host=os.environ.get("DB_HOST", "localhost"),
+    port=int(os.environ.get("DB_PORT", 5432)),
+)
 
 
 def get_connection():

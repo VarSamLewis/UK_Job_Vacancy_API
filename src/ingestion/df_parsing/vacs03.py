@@ -1,8 +1,6 @@
 from pathlib import Path
-#from src.utils.df_parsing_utils  import _xlsx_sheets_to_csvs
 import pandas as pd
 import os
-from typing import List
 from openpyxl import load_workbook
 
 from src.utils.logger import logger
@@ -75,8 +73,9 @@ def _xlsx_sheets_to_csvs_vacs03(file_path: str, output_folder: str, header_row: 
         raise
 
 def main():
-    folder = Path(r"C:\Users\samle\Source\Repos\UK_Job_Vacancy_API\Data")
-    output_path = Path(r"C:\Users\samle\Source\Repos\UK_Job_Vacancy_API\Data\vacs03")
+    BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+    folder = BASE_DIR / "Data"
+    output_path = BASE_DIR / "Data" / "vacs03"
     files = [f for f in os.listdir(folder) 
              if os.path.isfile(os.path.join(folder, f)) 
              and f.lower().endswith('.xlsx')

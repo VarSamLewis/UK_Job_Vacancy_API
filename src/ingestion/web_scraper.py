@@ -639,7 +639,7 @@ if __name__ == "__main__":
         "https://www.ons.gov.uk/employmentandlabourmarket/peoplenotinwork/unemployment/datasets/x06singlemonthvacanciesestimatesnotdesignatedasnationalstatistics"
     ]
     
-    download_path = r"C:\Users\samle\Source\Repos\UK_Job_Vacancy_API\Data"
+    download_path = str(Path(__file__).resolve().parent.parent.parent / "Data")
     
     # Enhanced configuration for better rate limiting
     downloader = ONSExcelDownloader(
